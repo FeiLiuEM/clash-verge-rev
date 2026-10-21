@@ -90,7 +90,8 @@ jobs:
           (cd out && for f in *; do n=$(printf '%s' "$f" | sed 's/[^A-Za-z0-9._-]/./g'); [ "$f" = "$n" ] || mv -- "$f" "$n"; done)
           {
             echo "ref: ${{ inputs.ref }}"
-            echo "commit: ${{ github.sha }}"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "commit-subject: $(git log -1 --format='%s')"
             echo "run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "platform: $(uname -srm)"

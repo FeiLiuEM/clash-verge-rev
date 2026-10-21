@@ -1,0 +1,111 @@
+name: Fork AppImage build
+
+# Fork-only validation pipeline for the AppImage work in #8276 / #8279.
+# Builds a chosen ref on ubuntu-22.04 (the base image the project's own CI uses), uploads the
+# bundles as workflow artifacts and, optionally, attaches them to a release so reviewers can
+# download them without a GitHub login.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build'
+        required: true
+        default: 'feat/appimage-linux-bundle'
+      release_tag:
+        description: 'Release tag to attach the assets to (leave empty for artifacts only)'
+        required: false
+        default: 'appimage-test'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  HUSKY: 0
+
+jobs:
+  linux-bundles:
+    name: Linux bundles (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout ${{ inputs.ref }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Install Rust 1.99.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-fork-appimage
+          key: 'fork-appimage-ubuntu-22.04-x86_64'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf xz-utils
+
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+          cache: 'pnpm'
+
+      - name: Install and prebuild
+        run: |
+          pnpm i
+          pnpm run prebuild x86_64-unknown-linux-gnu
+
+      - name: Throwaway updater key (bundler requires one on Linux)
+        run: |
+          mkdir -p "$RUNNER_TEMP/keys"
+          pnpm tauri signer generate -w "$RUNNER_TEMP/keys/test.key" -p "" --ci
+          echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/keys/test.key" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+
+      - name: Build deb + rpm + AppImage
+        env:
+          NODE_OPTIONS: '--max_old_space_size=4096'
+        run: |
+          pnpm tauri build --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage
+
+      - name: Collect assets
+        run: |
+          mkdir -p out
+          cp -v target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage out/ || true
+          cp -v target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb out/ || true
+          cp -v target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm out/ || true
+          # The bundler keeps spaces in asset names; normalize them the way the release tooling does.
+          (cd out && for f in *; do n=$(printf '%s' "$f" | sed 's/[^A-Za-z0-9._-]/./g'); [ "$f" = "$n" ] || mv -- "$f" "$n"; done)
+          sha256sum out/* > out/SHA256SUM.txt
+          cat out/SHA256SUM.txt
+          ls -l out
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash-verge-appimage-${{ inputs.ref }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish to a release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ inputs.release_tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "${{ inputs.release_tag }}" --repo "${{ github.repository }}" \
+              --title "AppImage validation builds" \
+              --notes "Validation builds for the AppImage work (#8276, #8279). Built from \`${{ inputs.ref }}\` at \`${{ github.sha }}\`. Signed with a throwaway key: not an official release, do not use for auto-update."
+          gh release upload "${{ inputs.release_tag }}" out/* --repo "${{ github.repository }}" --clobber

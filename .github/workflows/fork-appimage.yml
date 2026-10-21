@@ -88,19 +88,37 @@ jobs:
           cp -v target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm out/ || true
           # The bundler keeps spaces in asset names; normalize them the way the release tooling does.
           (cd out && for f in *; do n=$(printf '%s' "$f" | sed 's/[^A-Za-z0-9._-]/./g'); [ "$f" = "$n" ] || mv -- "$f" "$n"; done)
+          {
+            echo "ref: ${{ inputs.ref }}"
+            echo "commit: ${{ github.sha }}"
+            echo "run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "built-at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "platform: $(uname -srm)"
+            echo "rust: $(rustc -V)"
+            echo "node: $(node -v)"
+            echo "note: bundles signed with a throwaway key - validation build, never use for auto-update"
+          } > out/BUILD-INFO.txt
           sha256sum out/* > out/SHA256SUM.txt
           cat out/SHA256SUM.txt
           ls -l out
 
+      # Refs contain '/', which is not allowed in artifact names (NTFS-hostile characters).
+      - name: Compute artifact name
+        id: names
+        run: |
+          safe=$(printf '%s' "${{ inputs.ref }}" | sed 's|[^A-Za-z0-9._-]|-|g')
+          echo "artifact=clash-verge-appimage-${safe}" >> "$GITHUB_OUTPUT"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: clash-verge-appimage-${{ inputs.ref }}
+          name: ${{ steps.names.outputs.artifact }}
           path: out/*
           if-no-files-found: error
 
+      # Runs even if the artifact upload fails: the release asset is what reviewers download.
       - name: Publish to a release
-        if: ${{ inputs.release_tag != '' }}
+        if: ${{ always() && inputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
